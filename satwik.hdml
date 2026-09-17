@@ -1,0 +1,160 @@
+import { useState, useEffect, useMemo } from 'react';
+import { supabase } from '@/lib/supabase';
+import type { RoadSegment, TrafficReading } from '@/lib/supabase';
+import {
+  predictCongestion,
+  computeHourlyAverages,
+  identifyPeakHours,
+  getLocationAnalysis,
+  classifyCongestion,
+  getDayName,
+} from '@/lib/prediction';
+import { Header } from '@/components/Header';
+import { ControlPanel } from '@/components/ControlPanel';
+import { StatsCards } from '@/components/StatsCards';
+import { PredictionChart } from '@/components/PredictionChart';
+import { HistoricalChart } from '@/components/HistoricalChart';
+import { PeakHours } from '@/components/PeakHours';
+import { LocationAnalysis } from '@/components/LocationAnalysis';
+import { CongestionGauge } from '@/components/CongestionGauge';
+import { ConfidencePanel } from '@/components/ConfidencePanel';
+import { WeatherImpact } from '@/components/WeatherImpact';
+import { Loader2 } from 'lucide-react';
+
+function App() {
+  const [segments, setSegments] = useState<RoadSegment[]>([]);
+  const [readings, setReadings] = useState<TrafficReading[]>([]);
+  const [selectedSegmentId, setSelectedSegmentId] = useState('');
+  const [selectedDay, setSelectedDay] = useState(1); // Monday
+  const [weatherCondition, setWeatherCondition] = useState('clear');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadData() {
+      const [{ data: segData, error: segError }, { data: readData, error: readError }] = await Promise.all([
+        supabase.from('road_segments').select('*').order('name'),
+        supabase.from('traffic_readings').select('*').order('recorded_at', { ascending: true }),
+      ]);
+
+      if (segError || readError) {
+        console.error('Error loading data:', segError || readError);
+        return;
+      }
+
+      setSegments(segData ?? []);
+      setReadings(readData ?? []);
+      if (segData && segData.length > 0) {
+        setSelectedSegmentId(segData[0].id);
+      }
+      setLoading(false);
+    }
+    loadData();
+  }, []);
+
+  const segmentReadings = useMemo(() => {
+    return readings.filter(r => r.segment_id === selectedSegmentId);
+  }, [readings, selectedSegmentId]);
+
+  const hourlyAverages = useMemo(() => computeHourlyAverages(segmentReadings), [segmentReadings]);
+  const predictions = useMemo(
+    () => predictCongestion(segmentReadings, selectedDay, weatherCondition),
+    [segmentReadings, selectedDay, weatherCondition]
+  );
+  const peakHours = useMemo(() => identifyPeakHours(hourlyAverages), [hourlyAverages]);
+  const locationStats = useMemo(() => getLocationAnalysis(segmentReadings), [segmentReadings]);
+
+  const selectedSegment = segments.find(s => s.id === selectedSegmentId);
+  const currentHour = new Date().getHours();
+  const currentPrediction = predictions.find(p => p.hour === currentHour) ?? predictions[0];
+  const currentClass = classifyCongestion(currentPrediction?.predicted_congestion ?? 0);
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-950">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="h-10 w-10 animate-spin text-cyan-400" />
+          <p className="text-sm text-slate-400">Loading traffic data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      {/* Ambient background */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div className="absolute -top-40 left-1/4 h-96 w-96 rounded-full bg-cyan-500/5 blur-3xl" />
+        <div className="absolute top-1/2 right-1/4 h-96 w-96 rounded-full bg-blue-500/5 blur-3xl" />
+      </div>
+
+      <div className="relative">
+        <Header />
+
+        <main className="mx-auto max-w-7xl px-6 py-6">
+          {/* Stats row */}
+          <StatsCards
+            avgCongestion={locationStats.avgCongestion}
+            avgSpeed={locationStats.avgSpeed}
+            totalVehicles={locationStats.totalVehicles}
+            severePct={locationStats.severePct}
+            peakCongestion={locationStats.peakCongestion}
+          />
+
+          {/* Main grid */}
+          <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
+            {/* Left column - controls */}
+            <div className="space-y-6 lg:col-span-3">
+              <ControlPanel
+                segments={segments}
+                selectedSegmentId={selectedSegmentId}
+                onSelectSegment={setSelectedSegmentId}
+                selectedDay={selectedDay}
+                onSelectDay={setSelectedDay}
+                weatherCondition={weatherCondition}
+                onSelectWeather={setWeatherCondition}
+              />
+              <CongestionGauge
+                value={currentPrediction?.predicted_congestion ?? 0}
+                label={`Current Hour (${currentPrediction?.label ?? ''})`}
+                sublabel={getDayName(selectedDay)}
+              />
+              <WeatherImpact weatherCondition={weatherCondition} />
+            </div>
+
+            {/* Center column - charts */}
+            <div className="space-y-6 lg:col-span-6">
+              <PredictionChart predictions={predictions} />
+              <HistoricalChart hourly={hourlyAverages} />
+            </div>
+
+            {/* Right column - analysis */}
+            <div className="space-y-6 lg:col-span-3">
+              <ConfidencePanel predictions={predictions} />
+              <PeakHours peaks={peakHours} />
+              <LocationAnalysis
+                avgCongestion={locationStats.avgCongestion}
+                avgSpeed={locationStats.avgSpeed}
+                clearPct={locationStats.clearPct}
+                rainPct={locationStats.rainPct}
+                severePct={locationStats.severePct}
+                segmentName={selectedSegment?.name ?? ''}
+                segmentLocation={selectedSegment?.location ?? ''}
+                roadType={selectedSegment?.road_type ?? ''}
+              />
+            </div>
+          </div>
+
+          {/* Footer */}
+          <footer className="mt-8 border-t border-slate-800 pt-6 pb-4 text-center">
+            <p className="text-xs text-slate-500">
+              TrafficFlow AI — Predictive congestion analysis using weighted moving averages with weather and temporal adjustments.
+              Predictions are based on {readings.length.toLocaleString()} historical data points across {segments.length} road segments.
+            </p>
+          </footer>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+export default App;
