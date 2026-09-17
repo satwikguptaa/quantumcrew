@@ -1,2 +1,0 @@
-# quantumcrew
-hackathon
